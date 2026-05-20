@@ -1,0 +1,508 @@
+import pygame
+import random
+import sys
+
+# ====================== CONFIGURAÇÕES ======================
+BOARD_SIZE = 10
+CELL_SIZE = 40
+MARGIN = 30
+SHIP_SIZES = [7,5, 4, 3, 3, 2]  # Porta-aviões, Encouraçado, Cruzadores, Submarino
+
+# Cores
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+BLUE = (0, 100, 200)      # Água
+LIGHT_BLUE = (0, 150, 255)
+RED = (200, 0, 0)         # Hit
+GRAY = (100, 100, 100)
+GREEN = (0, 200, 0)
+YELLOW = (255, 255, 0)
+
+# Tamanho da janela
+WIDTH = MARGIN * 2 + CELL_SIZE * BOARD_SIZE * 2 + 100  # Dois tabuleiros + espaço
+HEIGHT = MARGIN * 3 + CELL_SIZE * BOARD_SIZE + 150
+
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Batalha Naval - Jogador vs Máquina")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont(None, 36)
+small_font = pygame.font.SysFont(None, 28)
+# ====================== IA ======================
+ai_targets = []
+# IA fácil: atira aleatoriamente
+def ai_easy_shot(board):
+    while True:
+        row = random.randint(0, BOARD_SIZE-1)
+        col = random.randint(0, BOARD_SIZE-1)
+        if (row, col) not in board.shots:
+            return row, col
+# IA difícil: atira aleatoriamente, mas se acertar, tenta posições adjacentes
+def ai_hard_shot(board):
+    global ai_targets
+    if ai_targets:
+        r, c = ai_targets.pop(0)
+        if (r, c) not in board.shots:
+            return r, c
+
+    while True:
+        row = random.randint(0, BOARD_SIZE-1)
+        col = random.randint(0, BOARD_SIZE-1)
+        if (row, col) not in board.shots:
+            return row, col
+
+def update_ai_targets(row, col, result, board):
+    global ai_targets
+    if result == "hit":
+        directions = [(-1,0),(1,0),(0,-1),(0,1)]
+        for dr, dc in directions:
+            r = row + dr
+            c = col + dc
+            if (0) <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                if (r, c) not in board.shots:
+                    ai_targets.append((r, c))
+# IA muito difícil: usa um heatmap para escolher a melhor posição
+def ai_very_hard_shot(board):
+    global ai_targets
+
+    # ================= TARGET MODE =================
+    while ai_targets:
+        r, c = ai_targets.pop(0)
+
+        if (r, c) not in board.shots:
+            return r, c
+
+    # ================= HUNT MODE =================
+    heatmap = [[0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+
+    remaining_ships = [
+        ship['size']
+        for ship in board.ships
+        if not ship['sunk']
+    ]
+
+    if not remaining_ships:
+        remaining_ships = SHIP_SIZES
+
+    for ship_size in remaining_ships:
+
+        # ===== Horizontal =====
+        for row in range(BOARD_SIZE):
+            for col in range(BOARD_SIZE - ship_size + 1):
+
+                valid = True
+                cells = []
+
+                for i in range(ship_size):
+
+                    r = row
+                    c = col + i
+
+                    # miss OU hit bloqueiam posição
+                    if board.grid[r][c] in [2, 3]:
+                        valid = False
+                        break
+
+                    cells.append((r, c))
+
+                if valid:
+                    for r, c in cells:
+                        heatmap[r][c] += 1
+
+        # ===== Vertical =====
+        for col in range(BOARD_SIZE):
+            for row in range(BOARD_SIZE - ship_size + 1):
+
+                valid = True
+                cells = []
+
+                for i in range(ship_size):
+
+                    r = row + i
+                    c = col
+
+                    if board.grid[r][c] in [2, 3]:
+                        valid = False
+                        break
+
+                    cells.append((r, c))
+
+                if valid:
+                    for r, c in cells:
+                        heatmap[r][c] += 1
+
+    # ================= Escolher melhor posição =================
+    best = None
+    best_score = -1
+
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+
+            if (row, col) not in board.shots:
+
+                if heatmap[row][col] > best_score:
+                    best_score = heatmap[row][col]
+                    best = (row, col)
+
+    return best
+#==========================Board=========================
+class Board:
+    def __init__(self, size=10):
+        self.size = size
+        self.grid = [[0 for _ in range(size)] for _ in range(size)]  # 0=água, 1=navio, 2=miss, 3=hit
+        self.ships = []
+        self.shots = set()
+
+    def is_valid_position(self, ship_size, row, col, orientation):
+        if orientation == 'H':
+            if col + ship_size > self.size: return False
+            for c in range(col, col + ship_size):
+                if self.grid[row][c] != 0: return False
+        else:  # 'V'
+            if row + ship_size > self.size: return False
+            for r in range(row, row + ship_size):
+                if self.grid[r][col] != 0: return False
+        return True
+
+    def place_ship(self, ship_size, row, col, orientation):
+        if not self.is_valid_position(ship_size, row, col, orientation):
+            return False
+        positions = []
+        if orientation == 'H':
+            for c in range(col, col + ship_size):
+                self.grid[row][c] = 1
+                positions.append((row, c))
+        else:
+            for r in range(row, row + ship_size):
+                self.grid[r][col] = 1
+                positions.append((r, col))
+        
+        self.ships.append({'size': ship_size, 'positions': positions, 'hits': 0, 'sunk': False})
+        return True
+
+    def place_ships_randomly(self):
+        for size in SHIP_SIZES:
+            placed = False
+            attempts = 0
+            while not placed and attempts < 200:
+                row = random.randint(0, self.size-1)
+                col = random.randint(0, self.size-1)
+                orientation = random.choice(['H', 'V'])
+                if self.place_ship(size, row, col, orientation):
+                    placed = True
+                attempts += 1
+            if not placed:
+                self.reset_board()
+                return self.place_ships_randomly()
+        return True
+
+    def receive_shot(self, row, col):
+        if (row, col) in self.shots:
+            return "already"
+        self.shots.add((row, col))
+        
+        if self.grid[row][col] == 1:  # Hit
+            self.grid[row][col] = 3
+            for ship in self.ships:
+                if (row, col) in ship['positions']:
+                    ship['hits'] += 1
+                    if ship['hits'] == ship['size']:
+                        ship['sunk'] = True
+                    break
+            return "hit"
+        else:
+            self.grid[row][col] = 2  # Miss
+            return "miss"
+
+    def all_ships_sunk(self):
+        return all(ship['sunk'] for ship in self.ships)
+
+    def reset_board(self):
+        self.grid = [[0 for _ in range(self.size)] for _ in range(self.size)]
+        self.ships = []
+        self.shots = set()
+
+# ====================== FUNÇÕES DE DESENHO ======================
+def draw_board(board, x_offset, y_offset, hide_ships=False, title=""):
+    # Título
+    text = font.render(title, True, WHITE)
+    screen.blit(text, (x_offset + (CELL_SIZE * BOARD_SIZE)//2 - text.get_width()//2, y_offset - 55))
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+            x = x_offset + col * CELL_SIZE
+            y = y_offset + row * CELL_SIZE
+            rect = pygame.Rect(x, y, CELL_SIZE, CELL_SIZE)
+            
+            state = board.grid[row][col]
+            
+            if hide_ships and state == 1:
+                state = 0  # Esconde navios do inimigo
+            
+            color = BLACK
+            if state == 0:   # Água
+                color = BLUE
+            elif state == 1: # Navio
+                color = GREEN
+            elif state == 2: # Miss
+                color = LIGHT_BLUE
+            elif state == 3: # Hit
+                color = RED
+            
+            pygame.draw.rect(screen, color, rect)
+            pygame.draw.rect(screen, WHITE, rect, 1)
+
+            # Marca de tiro
+            if (row, col) in board.shots:
+                if state == 3:
+                    pygame.draw.circle(screen, YELLOW, (x + CELL_SIZE//2, y + CELL_SIZE//2), CELL_SIZE//4)
+                else:
+                    pygame.draw.line(screen, YELLOW, (x+8, y+8), (x+CELL_SIZE-8, y+CELL_SIZE-8), 3)
+                    pygame.draw.line(screen, YELLOW, (x+CELL_SIZE-8, y+8), (x+8, y+CELL_SIZE-8), 3)
+
+    # Letras e números
+    for i in range(BOARD_SIZE):
+        num = small_font.render(str(i), True, WHITE)
+        screen.blit(num, (x_offset - 25, y_offset + i*CELL_SIZE + 10))
+        letra = small_font.render(chr(65 + i), True, WHITE)
+        screen.blit(letra, (x_offset + i*CELL_SIZE + 15, y_offset - 25))
+
+def pixel_to_grid(x, y, x_offset, y_offset):
+    col = (x - x_offset) // CELL_SIZE
+    row = (y - y_offset) // CELL_SIZE
+    if 0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE:
+        return row, col
+    return None, None
+
+
+# ====================== JOGO ======================
+def main():
+    show_controls = False
+    player_board = Board()
+    computer_board = Board()
+    ai_difficulty = None  # "fácil", "difícil","muito díficil"
+
+    # Posiciona navios da máquina
+    computer_board.place_ships_randomly()
+
+    # Variáveis de controle
+    game_state = "placing"          # placing, player_turn, computer_turn, game_over
+    current_ship_index = 0
+    ship_orientation = 'H'
+    message = "Posicione seus navios (clique no seu tabuleiro)"
+    game_over_message = ""
+    show_controls = False
+    running = True
+    while running:
+        screen.fill(BLACK)
+
+        # Desenho dos tabuleiros
+        draw_board(player_board, MARGIN, MARGIN + 40, hide_ships=False, title="Sua Frota")
+        draw_board(computer_board, MARGIN + CELL_SIZE*BOARD_SIZE + 50, MARGIN + 40, hide_ships=True, title="Frota Inimiga")
+
+        # Mensagem de status
+        msg_surf = font.render(message, True, YELLOW)
+        screen.blit(msg_surf, (WIDTH//2 - msg_surf.get_width()//2, HEIGHT - 90))
+
+        # Botões
+        btn_controls = pygame.Rect(800, HEIGHT - 50, 40, 40)
+        pygame.draw.rect(screen, GRAY, btn_controls)
+        screen.blit(small_font.render("*", True, WHITE),
+            (btn_controls.x + 15, btn_controls.y + 10))
+        btn_easy = pygame.Rect(50, HEIGHT - 50, 140, 40)
+        btn_hard = pygame.Rect(200, HEIGHT - 50, 140, 40)
+        pygame.draw.rect(screen, GRAY, btn_easy)
+        pygame.draw.rect(screen, GRAY, btn_hard)
+        screen.blit(small_font.render("Fácil", True, WHITE), (btn_easy.x + 20, btn_easy.y + 10))
+        screen.blit(small_font.render("Médio", True, WHITE), (btn_hard.x + 10, btn_hard.y + 10))
+        btn_very_hard = pygame.Rect(350, HEIGHT - 50, 140, 40)
+        pygame.draw.rect(screen, GRAY, btn_very_hard)
+        screen.blit(small_font.render("Difícil", True, WHITE),
+                    (btn_very_hard.x + 5, btn_very_hard.y + 10))
+        btn_random = pygame.Rect(500, HEIGHT - 50, 140, 40)
+        btn_new = pygame.Rect(650, HEIGHT - 50, 140, 40)
+        pygame.draw.rect(screen, GRAY, btn_random)
+        pygame.draw.rect(screen, GRAY, btn_new)
+        screen.blit(small_font.render("Aleatório", True, WHITE), (btn_random.x + 20, btn_random.y + 10))
+        screen.blit(small_font.render("Novo Jogo", True, WHITE), (btn_new.x + 25, btn_new.y + 10))
+                
+
+        for event in pygame.event.get():
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    show_controls = not show_controls
+            if event.type == pygame.QUIT:
+                running = False
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                if btn_controls.collidepoint(mx, my):
+                    show_controls = not show_controls
+
+                if btn_easy.collidepoint(mx, my):
+                    ai_difficulty = "easy"
+                    message = "IA Fácil selecionada"
+
+                if btn_hard.collidepoint(mx, my):
+                    ai_difficulty = "hard"
+                    message = "IA Média selecionada"
+                if btn_very_hard.collidepoint(mx, my):
+                    ai_difficulty = "very_hard"
+                    message = "IA Difícil selecionada"
+
+                # Clique no botão Aleatório
+                if btn_random.collidepoint(mx, my) and game_state == "placing":
+                    ai_targets.clear()
+                    player_board.reset_board()
+                    player_board.place_ships_randomly()
+                    current_ship_index = len(SHIP_SIZES)
+                    game_state = "player_turn"
+                    message = "Sua vez! Atire na frota inimiga."
+
+                # Clique no botão Novo Jogo
+                if btn_new.collidepoint(mx, my):
+                    player_board.reset_board()
+                    computer_board.reset_board()
+                    computer_board.place_ships_randomly()
+                    current_ship_index = 0
+                    game_state = "placing"
+                    message = "Posicione seus navios"
+
+                # Clique durante posicionamento
+                if game_state == "placing" and ai_difficulty:
+                    row, col = pixel_to_grid(mx, my, MARGIN, MARGIN + 40)
+                    if row is not None and current_ship_index < len(SHIP_SIZES):
+                        size = SHIP_SIZES[current_ship_index]
+                        if player_board.place_ship(size, row, col, ship_orientation):
+                            current_ship_index += 1
+                            if current_ship_index >= len(SHIP_SIZES):
+                                game_state = "player_turn"
+                                message = "Todos navios posicionados! Sua vez de atacar."
+
+                # Clique para atirar (tabuleiro da máquina)
+                elif game_state == "player_turn":
+                    row, col = pixel_to_grid(mx, my, MARGIN + CELL_SIZE*BOARD_SIZE + 50, MARGIN + 40)
+                    if row is not None:
+                        result = computer_board.receive_shot(row, col)
+                        if result == "hit":
+                            message = "Acertou um navio!"
+                        elif result == "miss":
+                            message = "Tiro na água!"
+                        
+                        if computer_board.all_ships_sunk():
+                            game_state = "game_over"
+                            game_over_message = "VOCÊ VENCEU! Parabéns!"
+                        else:
+                            game_state = "computer_turn"
+
+        # Turno da máquina
+        if ai_difficulty is None:
+            message = "Escolha a dificuldade!"   
+        elif game_state == "computer_turn":
+        # ================= TELA DE CONTROLES =================
+            if show_controls:
+                overlay = pygame.Surface((WIDTH, HEIGHT))
+                overlay.set_alpha(220)
+                overlay.fill((20, 20, 20))
+                screen.blit(overlay, (0, 0))
+
+                titulo = font.render("CONTROLES", True, YELLOW)
+                screen.blit(titulo, (WIDTH//2 - titulo.get_width()//2, 80))
+
+                controles = [
+                "ESC -> Abrir/Fechar menu",
+                "R -> Girar navios",
+                "Mouse -> Posicionar navios",
+                "Mouse -> Atacar inimigo",
+                "Aleatório -> Posiciona navios automaticamente",
+                "Novo Jogo -> Reinicia a partida",
+                "Escolha a dificuldade antes de jogar"
+            ]
+                for i, texto in enumerate(controles):
+                    linha = small_font.render(texto, True, WHITE)
+                    screen.blit(linha, (120, 170 + i * 45))
+
+                fechar = small_font.render("Pressione ESC para voltar", True, YELLOW)
+                screen.blit(fechar, (WIDTH//2 - fechar.get_width()//2, HEIGHT - 100))
+            pygame.display.flip()
+            pygame.time.wait(600)  # pequena pausa
+            
+            # IA escolhe onde atirar
+            if ai_difficulty == "easy":
+                shot = ai_easy_shot(player_board)
+            elif ai_difficulty == "hard":
+                shot = ai_hard_shot(player_board)
+            elif ai_difficulty == "very_hard":
+                shot = ai_very_hard_shot(player_board)
+            else:
+                shot= None
+            if shot is None:
+                message = "Escolha a dificuldade!"
+                game_state = "player_turn"
+                continue
+            row,col = shot
+            result = player_board.receive_shot(row,col)
+            if ai_difficulty in ["hard", "very_hard"]:
+                update_ai_targets(row, col, result, player_board)
+                
+            if result == "hit":
+                message = "A máquina acertou seu navio!"
+            else:
+                message = "A máquina errou!"
+            
+            if player_board.all_ships_sunk():
+                game_state = "game_over"
+                game_over_message = "A MÁQUINA VENCEU!"
+            else:
+                game_state = "player_turn"
+
+        # Tela de Game Over
+        if game_state == "game_over":
+            overlay = pygame.Surface((WIDTH, HEIGHT))
+            overlay.set_alpha(180)
+            overlay.fill(BLACK)
+            screen.blit(overlay, (0, 0))
+            
+            go_text = font.render(game_over_message, True, YELLOW)
+            screen.blit(go_text, (WIDTH//2 - go_text.get_width()//2, HEIGHT//2 - 50))
+            
+            restart_text = small_font.render("Clique em 'Novo Jogo' para jogar novamente", True, WHITE)
+            screen.blit(restart_text, (WIDTH//2 - restart_text.get_width()//2, HEIGHT//2 + 20))
+
+        # Troca de orientação com tecla R
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_r]:
+            ship_orientation = 'V' if ship_orientation == 'H' else 'H'
+            pygame.time.wait(200)
+# ================= TELA DE CONTROLES =================
+        if show_controls:
+                overlay = pygame.Surface((WIDTH, HEIGHT))
+                overlay.set_alpha(220)
+                overlay.fill((20, 20, 20))
+                screen.blit(overlay, (0, 0))
+
+                titulo = font.render("CONTROLES", True, YELLOW)
+                screen.blit(titulo, (WIDTH//2 - titulo.get_width()//2, 80))
+
+                controles = [
+                "ESC -> Abrir/Fechar menu",
+                "R -> Girar navios",
+                "Mouse -> Posicionar navios",
+                "Mouse -> Atacar inimigo",
+                "Aleatório -> Posiciona navios automaticamente",
+                "Novo Jogo -> Reinicia a partida",
+                "Escolha a dificuldade antes de jogar"
+            ]
+                for i, texto in enumerate(controles):
+                    linha = small_font.render(texto, True, WHITE)
+                    screen.blit(linha, (120, 170 + i * 45))
+
+                fechar = small_font.render("Pressione ESC para voltar", True, YELLOW)
+                screen.blit(fechar, (WIDTH//2 - fechar.get_width()//2, HEIGHT - 100))
+        pygame.display.flip()
+        clock.tick(60)
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
